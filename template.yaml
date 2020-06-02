@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  instance-resizer
+
+  Sample SAM Template for instance-resizer
+
+Parameters:
+  # Optional parameters passed by the Event Engine to the stack.
+  # EEEventId:
+  #   Description: "Unique ID of this Event"
+  #   Type: String
+  # EETeamId:
+  #   Description: "Unique ID of this Team"
+  #   Type: String
+  # EEModuleId:
+  #   Description: "Unique ID of this module"
+  #   Type: String
+  # EEModuleVersion:
+  #   Description: "Version of this module"
+  #   Type: String
+  EEAssetsBucket:
+    Description: "Region-specific assets S3 bucket name (e.g. ee-assets-prod-us-east-1)"
+    Type: String
+    Default: "cf-templates-1xnac3rwgtxo7-us-west-2"
+  EEAssetsKeyPrefix:
+    Description: "S3 key prefix where this modules assets are stored. (e.g. modules/my_module/v1/)"
+    Type: String
+    Default: ""
+  # EEMasterAccountId:
+  #   Description: "AWS Account Id of the Master account"
+  #   Type: String
+  # EETeamRoleArn:
+  #   Description: "ARN of the Team Role"
+  #   Type: String
+  # EEKeyPair:
+  #   Description: "Name of the EC2 KeyPair generated for the Team"
+  #   Type: AWS::EC2::KeyPair::KeyName
+  # Your own parameters for the stack. NOTE: All these parameters need to have a default value.
+  EBSVolumeSize:
+    Description: "Size of EBS Volume (in GB)"
+    Type: Number
+    Default: 25
+  PolicyArn:
+    Description: "Arn for IAM Policy to attach to Instance Profile"
+    Type: String
+    Default: "NONE"
+  UserDataScript:
+    Description: "File name for user-data script"
+    Type: String
+    Default: "userdata.sh"
+
+Conditions: 
+  AddPolicy: !Not [!Equals [ !Ref PolicyArn, "NONE" ]]
+  AddUserData: !Not [!Equals [ !Ref UserDataScript, "NONE" ]]
+  
+Resources:
+  StockTradingStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/stock_trader.asl.json
+      DefinitionSubstitutions:
+        GetEnvironmentInfoFunctionArn: !GetAtt GetEnvironmentInfoFunction.Arn
+        EnvironmentHealthCheckFunctionArn: !GetAtt EnvironmentHealthCheckFunction.Arn
+        ResizeEBSFunctionArn: !GetAtt ResizeEBSFunction.Arn
+        GetOrCreateIAMRoleFunctionArn: !GetAtt GetOrCreateIAMRoleFunction.Arn
+        SendCommandFunctionArn:  !GetAtt SendCommandFunction.Arn
+        WaitForStabilizeFunctionArn:  !GetAtt WaitForStabilizeFunction.Arn
+      Events:
+        NewCloud9Event:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+                source:
+                  - aws.tag
+                detail-type:
+                  - "Tag Change on Resource"
+                detail:
+                  changed-tag-keys: 
+                    - aws:cloudformation:stack-name
+                    - aws:cloud9:environment
+                    - aws:cloudformation:stack-id
+                    - aws:cloudformation:logical-id
+                    - aws:cloud9:owner
+                  service:
+                    - ec2
+                  resource-type:
+                    - instance
+                  version: [1]
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref GetEnvironmentInfoFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref EnvironmentHealthCheckFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ResizeEBSFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref GetOrCreateIAMRoleFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SendCommandFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WaitForStabilizeFunction
+
+  GetEnvironmentInfoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/get_env_info/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+
+  ResizeEBSFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/resize_ebs/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Environment:
+        Variables:
+          VolumeSize: !Ref EBSVolumeSize
+      Policies:
+      - Statement:
+        - Sid: ResizePolicy
+          Effect: Allow
+          Action:
+            - ec2:DescribeInstances
+            - ec2:ModifyVolume
+            - ec2:DescribeVolumes
+          Resource: "*"
+
+  EnvironmentHealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/instance_healthy/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Timeout: 900
+      Policies:
+      - Statement:
+        - Sid: ResizePolicy
+          Effect: Allow
+          Action:
+            - "*"
+          Resource: "*"
+
+  GetOrCreateIAMRoleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/create_iam_role/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Timeout: 900
+      Environment: !If 
+        - AddPolicy
+        - Variables:
+            PolicyArn: !Ref PolicyArn
+        - !Ref "AWS::NoValue"
+      Policies:
+      - Statement:
+        - Sid: ResizePolicy
+          Effect: Allow
+          Action:
+            - "*"
+          Resource: "*"
+
+  SendCommandFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/send_command/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Environment: !If 
+        - AddUserData
+        - Variables: 
+            S3Bucket: !Ref EEAssetsBucket
+            S3Object: !Sub "${EEAssetsKeyPrefix}${UserDataScript}"
+        - !Ref "AWS::NoValue"
+      Policies:
+      - Statement:
+        - Sid: ResizePolicy
+          Effect: Allow
+          Action:
+            - "*"
+          Resource: "*"
+
+  WaitForStabilizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/stabilize/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Policies:
+      - Statement:
+        - Sid: ResizePolicy
+          Effect: Allow
+          Action:
+            - "ssm:GetCommandInvocation"
+          Resource: "*"
+
+  CustomFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/rule_update/
+      Handler: app.lambda_handler
+      Runtime: python3.6
+      Environment:
+        Variables:
+          RuleName: !Ref StockTradingStateMachineNewCloud9Event
+      Policies:
+      - Statement:
+        - Sid: EBPolicy
+          Effect: Allow
+          Action:
+            - events:DescribeRule
+            - events:PutRule
+          Resource: !GetAtt StockTradingStateMachineNewCloud9Event.Arn
+
+  CustomResource:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt CustomFunction.Arn
+
+Outputs:
+  StockTradingStateMachineArn:
+    Description: "Stock Trading State machine ARN"
+    Value: !Ref StockTradingStateMachine
+  StockTradingStateMachineRoleArn:
+    Description: "IAM Role created for Stock Trading State machine based on the specified SAM Policy Templates"
+    Value: !GetAtt StockTradingStateMachineRole.Arn
