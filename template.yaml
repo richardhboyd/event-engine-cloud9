@@ -44,7 +44,7 @@ Parameters:
   PolicyArn:
     Description: "Arn for IAM Policy to attach to Instance Profile"
     Type: String
-    Default: "NONE"
+    Default: "arn:aws:iam::aws:policy/AdministratorAccess"
   UserDataScript:
     Description: "File name for user-data script"
     Type: String
@@ -59,144 +59,88 @@ Resources:
     Type: AWS::Serverless::StateMachine
     Properties:
       Definition:
-        StartAt: "Environment Health Check"
-        States: 
-          "Environment Health Check": 
+        StartAt: Environment Health Check
+        States:
+          Environment Health Check:
             Type: Task
-            Resource: "${EnvironmentHealthCheckFunctionArn}"
-            Retry: 
-              - ErrorEquals: 
-                  - "States.TaskFailed"
-                IntervalSeconds: 45
-                MaxAttempts: 15
-                BackoffRate: 1.5
-            Next: "Resize EBS Volume"
-          "Resize EBS Volume": 
+            Resource: ${EnvironmentHealthCheckFunctionArn}
+            Retry:
+            - ErrorEquals:
+              - States.TaskFailed
+              IntervalSeconds: 45
+              MaxAttempts: 15
+              BackoffRate: 1.5
+            Next: Get or Create IAM Role
+          Get or Create IAM Role:
             Type: Task
-            Resource: "${ResizeEBSFunctionArn}"
-            Retry: 
-              - ErrorEquals: 
-                  - "States.TaskFailed"
-                IntervalSeconds: 90
-                MaxAttempts: 5
-                BackoffRate: 2
-            Next: "Get or Create IAM Role"
-          "Get or Create IAM Role": 
-            Type: Task
-            Resource: "${GetOrCreateIAMRoleFunctionArn}"
-            Retry: 
-              - ErrorEquals: 
-                  - "States.TaskFailed"
-                IntervalSeconds: 30
-                MaxAttempts: 5
-                BackoffRate: 1.5
-            Next: "Wait Two Minutes"
-          "Wait Two Minutes":
-            Type: "Wait"
+            Resource: ${GetOrCreateIAMRoleFunctionArn}
+            Retry:
+            - ErrorEquals:
+              - States.TaskFailed
+              IntervalSeconds: 30
+              MaxAttempts: 5
+              BackoffRate: 1.5
+            Next: Wait Two Minutes
+          Wait Two Minutes:
+            Type: Wait
             Seconds: 120
-            Next: "Send Command"
-          "Send Command": 
+            Next: Send Command
+          Send Command:
             Type: Task
-            Resource: "${SendCommandFunctionArn}"
-            Retry: 
-              - ErrorEquals: 
-                  - "States.TaskFailed"
-                IntervalSeconds: 90
-                MaxAttempts: 10
-                BackoffRate: 1.5
-            Next: "Wait To Stabilize"
-          "Wait To Stabilize": 
+            Resource: ${SendCommandFunctionArn}
+            Retry:
+            - ErrorEquals:
+              - States.TaskFailed
+              IntervalSeconds: 90
+              MaxAttempts: 10
+              BackoffRate: 1.5
+            Next: Wait To Stabilize
+          Wait To Stabilize:
             Type: Task
-            Resource: "${WaitForStabilizeFunctionArn}"
-            Retry: 
-              - ErrorEquals: 
-                  - "States.TaskFailed"
-                IntervalSeconds: 15
-                MaxAttempts: 5
-                BackoffRate: 1.5
+            Resource: ${WaitForStabilizeFunctionArn}
+            Retry:
+            - ErrorEquals:
+              - States.TaskFailed
+              IntervalSeconds: 15
+              MaxAttempts: 5
+              BackoffRate: 1.5
             End: true
       DefinitionSubstitutions:
         EnvironmentHealthCheckFunctionArn: !GetAtt EnvironmentHealthCheckFunction.Arn
-        ResizeEBSFunctionArn: !GetAtt ResizeEBSFunction.Arn
         GetOrCreateIAMRoleFunctionArn: !GetAtt GetOrCreateIAMRoleFunction.Arn
-        SendCommandFunctionArn:  !GetAtt SendCommandFunction.Arn
-        WaitForStabilizeFunctionArn:  !GetAtt WaitForStabilizeFunction.Arn
+        SendCommandFunctionArn: !GetAtt SendCommandFunction.Arn
+        WaitForStabilizeFunctionArn: !GetAtt WaitForStabilizeFunction.Arn
       Events:
         NewCloud9Event:
           Type: EventBridgeRule
           Properties:
             Pattern:
-                source:
-                  - aws.tag
-                detail-type:
-                  - "Tag Change on Resource"
-                detail:
-                  changed-tag-keys: 
-                    - aws:cloudformation:stack-name
-                    - aws:cloud9:environment
-                    - aws:cloudformation:stack-id
-                    - aws:cloudformation:logical-id
-                    - aws:cloud9:owner
-                  service:
-                    - ec2
-                  resource-type:
-                    - instance
-                  version: [1]
+              source:
+              - aws.tag
+              detail-type:
+              - Tag Change on Resource
+              detail:
+                changed-tag-keys:
+                - aws:cloudformation:stack-name
+                - aws:cloud9:environment
+                - aws:cloudformation:stack-id
+                - aws:cloudformation:logical-id
+                - aws:cloud9:owner
+                service:
+                - ec2
+                resource-type:
+                - instance
+                version:
+                - 1
       Policies:
-        - LambdaInvokePolicy:
-            FunctionName: !Ref EnvironmentHealthCheckFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref ResizeEBSFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref GetOrCreateIAMRoleFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref SendCommandFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref WaitForStabilizeFunction
-
-  ResizeEBSFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      InlineCode: |
-        import boto3
-        import os
-        ec2_client= boto3.client('ec2')
-        
-        def lambda_handler(event, context):
-            print(event)
-            environment_id = event["detail"]["tags"]["aws:cloud9:environment"]
-            instance_id = event["resources"][0].split(":")[-1].split("/")[-1]
-            instance = ec2_client.describe_instances(Filters=[{'Name': 'instance-id', 'Values': [instance_id]}])['Reservations'][0]['Instances'][0]
-            block_volume_id = instance['BlockDeviceMappings'][0]['Ebs']['VolumeId']
-            ec2 = boto3.resource('ec2')
-            volume = ec2.Volume(block_volume_id)
-            if volume.size != int(os.environ.get('VolumeSize', '50')):
-                try:
-                    ec2_client.modify_volume(VolumeId=block_volume_id,Size=int(os.environ.get('VolumeSize', '50')))
-                except Exception as e:
-                    print(e)
-                    raise e
-            
-            environment_info = {
-                "instance_id": instance_id,
-                "environment_id": environment_id
-            }
-            return environment_info
-      Handler: index.lambda_handler
-      Runtime: python3.6
-      Environment:
-        Variables:
-          VolumeSize: !Ref EBSVolumeSize
-      Policies:
-      - Statement:
-        - Sid: ResizePolicy
-          Effect: Allow
-          Action:
-            - ec2:DescribeInstances
-            - ec2:ModifyVolume
-            - ec2:DescribeVolumes
-          Resource: "*"
-
+      - LambdaInvokePolicy:
+          FunctionName: !Ref EnvironmentHealthCheckFunction
+      - LambdaInvokePolicy:
+          FunctionName: !Ref GetOrCreateIAMRoleFunction
+      - LambdaInvokePolicy:
+          FunctionName: !Ref SendCommandFunction
+      - LambdaInvokePolicy:
+          FunctionName: !Ref WaitForStabilizeFunction
   EnvironmentHealthCheckFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -301,6 +245,7 @@ Resources:
                     RoleName=role_name,
                     PolicyArn='arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
                 )
+                # TODO Create Policy for resizing EBS
             except Exception as e:
                 raise e
             try:
@@ -369,16 +314,46 @@ Resources:
         s3_resource = boto3.resource('s3')
         
         def get_preamble():
-            return """
+            return f"""
+        IN=$(curl http://169.254.169.254/latest/meta-data//hostname)
+        arrIN=(${{IN//./ }})
+        aws configure set profile.default.region ${{arrIN[1]}}
+        SIZE={int(os.environ.get('VolumeSize', '25'))}
+        
+        # Get the ID of the environment host Amazon EC2 instance.
+        INSTANCEID=$(curl http://169.254.169.254/latest/meta-data//instance-id)
+        
+        # Get the ID of the Amazon EBS volume associated with the instance.
+        VOLUMEID=$(aws ec2 describe-instances \
+          --instance-id $INSTANCEID \
+          --query "Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId" \
+          --output text)
+        
+        # Resize the EBS volume.
+        aws ec2 modify-volume --volume-id $VOLUMEID --size $SIZE
+        
+        # Wait for the resize to finish.
+        while [ \
+          "$(aws ec2 describe-volumes-modifications \
+            --volume-id $VOLUMEID \
+            --filters Name=modification-state,Values="optimizing","completed" \
+            --query "length(VolumesModifications)"\
+            --output text)" != "1" ]; do
+        sleep 1
+        done
+        
         if [ $(readlink -f /dev/xvda) = "/dev/xvda" ]
         then
           # Rewrite the partition table so that the partition takes up all the space that it can.
           sudo growpart /dev/xvda 1
+         
           # Expand the size of the file system.
           sudo resize2fs /dev/xvda1
+        
         else
           # Rewrite the partition table so that the partition takes up all the space that it can.
           sudo growpart /dev/nvme0n1 1
+        
           # Expand the size of the file system.
           sudo resize2fs /dev/nvme0n1p1
         fi
@@ -452,12 +427,17 @@ Resources:
         
       Handler: index.lambda_handler
       Runtime: python3.6
-      Environment: !If 
-        - AddUserData
-        - Variables: 
-            S3Bucket: !Ref EEAssetsBucket
-            S3Object: !Sub "${EEAssetsKeyPrefix}${UserDataScript}"
-        - !Ref "AWS::NoValue"
+      Environment:
+        Variables:
+          VolumeSize: !Ref EBSVolumeSize
+          S3Bucket: !If
+            - AddUserData
+            - !Ref EEAssetsBucket
+            - !Ref "AWS::NoValue"
+          S3Object: !If
+            - AddUserData
+            - S3Object: !Sub "${EEAssetsKeyPrefix}${UserDataScript}"
+            - !Ref "AWS::NoValue"
       Policies:
       - Statement:
         - Sid: ResizePolicy

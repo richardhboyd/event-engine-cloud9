@@ -2,12 +2,10 @@ version = 0.1
 [default]
 [default.deploy]
 [default.deploy.parameters]
-stack_name = "resize026"
+stack_name = "resize032"
 s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-4mjiayxci6nh"
-s3_prefix = "resize026"
-# s3_bucket = "ee-assets-prod-us-east-1"
-# s3_prefix = "modules/daf327a7333e4a928acd1484046fa694/v1"
+s3_prefix = "resize032"
 region = "us-west-2"
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "EEAssetsBucket=\"cf-templates-1xnac3rwgtxo7-us-west-2\" EEAssetsKeyPrefix=\"data/\" EBSVolumeSize=\"25\" PolicyArn=\"NONE\" UserDataScript=\"userdata.sh\""
+parameter_overrides = "EEAssetsBucket=\"cf-templates-1xnac3rwgtxo7-us-west-2\" EEAssetsKeyPrefix=\"data/\" EBSVolumeSize=\"25\" PolicyArn=\"arn:aws:iam::aws:policy/AdministratorAccess\" UserDataScript=\"userdata.sh\""
 
