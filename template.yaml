@@ -152,8 +152,8 @@ Resources:
         ec2_client = boto3.client('ec2')
         
         def lambda_handler(event, context):
-            instance_id = event['instance_id']
-            environment_id = event['environment_id']
+            instance_id = event['resources'][0].split("/")[1]
+            environment_id = event['detail']['tags']['aws:cloud9:environment']
             environment_status = c9_client.describe_environment_status(environmentId=environment_id)
             instance_status = ec2_client.describe_instances(InstanceIds=[instance_id])
             try:
