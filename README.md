@@ -1,4 +1,5 @@
-# instance-resizer
+# Cloud9 Environment bootstrapper
+Once the template is deployed, you can test new environments being updated with the following command.
 ````bash
 ENV_NAME=$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 12 | head -n 1)
 OWNER_ARN=[your ARN here]
