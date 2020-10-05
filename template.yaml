@@ -1,9 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  instance-resizer
-
-  Sample SAM Template for instance-resizer
+  State machine that will bootstrap a Cloud9 SSM Environment
 
 Parameters:
   # Optional parameters passed by the Event Engine to the stack.
@@ -50,10 +48,10 @@ Parameters:
     Type: String
     Default: "userdata.sh"
 
-Conditions: 
+Conditions:
   AddPolicy: !Not [!Equals [ !Ref PolicyArn, "NONE" ]]
   AddUserData: !Not [!Equals [ !Ref UserDataScript, "NONE" ]]
-  
+
 Resources:
   BootStrapC9StateMachine:
     Type: AWS::Serverless::StateMachine
@@ -70,20 +68,6 @@ Resources:
               IntervalSeconds: 45
               MaxAttempts: 15
               BackoffRate: 1.5
-            Next: Get or Create IAM Role
-          Get or Create IAM Role:
-            Type: Task
-            Resource: ${GetOrCreateIAMRoleFunctionArn}
-            Retry:
-            - ErrorEquals:
-              - States.TaskFailed
-              IntervalSeconds: 30
-              MaxAttempts: 5
-              BackoffRate: 1.5
-            Next: Wait Two Minutes
-          Wait Two Minutes:
-            Type: Wait
-            Seconds: 120
             Next: Send Command
           Send Command:
             Type: Task
@@ -107,7 +91,6 @@ Resources:
             End: true
       DefinitionSubstitutions:
         EnvironmentHealthCheckFunctionArn: !GetAtt EnvironmentHealthCheckFunction.Arn
-        GetOrCreateIAMRoleFunctionArn: !GetAtt GetOrCreateIAMRoleFunction.Arn
         SendCommandFunctionArn: !GetAtt SendCommandFunction.Arn
         WaitForStabilizeFunctionArn: !GetAtt WaitForStabilizeFunction.Arn
       Events:
@@ -136,8 +119,6 @@ Resources:
       - LambdaInvokePolicy:
           FunctionName: !Ref EnvironmentHealthCheckFunction
       - LambdaInvokePolicy:
-          FunctionName: !Ref GetOrCreateIAMRoleFunction
-      - LambdaInvokePolicy:
           FunctionName: !Ref SendCommandFunction
       - LambdaInvokePolicy:
           FunctionName: !Ref WaitForStabilizeFunction
@@ -147,10 +128,10 @@ Resources:
       InlineCode: |
         import boto3
         import time
-        
+
         c9_client = boto3.client("cloud9")
         ec2_client = boto3.client('ec2')
-        
+
         def lambda_handler(event, context):
             instance_id = event['resources'][0].split("/")[1]
             environment_id = event['detail']['tags']['aws:cloud9:environment']
@@ -160,7 +141,7 @@ Resources:
                 state = instance_status['Reservations'][0]['Instances'][0]['State']['Name']
             except Exception as _:
                 state = 'UNKNOWN'
-            
+
             while environment_status['status'] != 'ready' and state != 'running':
                 print("sleeping")
                 time.sleep(10)
@@ -188,120 +169,6 @@ Resources:
             - "ec2:DescribeInstances"
           Resource: "*"
 
-  GetOrCreateIAMRoleFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      InlineCode: |
-        import boto3
-        import json
-        import os
-        from time import sleep
-        iam_client= boto3.client('iam')
-        ec2_client = boto3.client('ec2')
-        
-        def build_arn(profile_name: str) -> str:
-            account_id = boto3.client('sts').get_caller_identity()['Account']
-            return f'arn:aws:iam::{account_id}:instance-profile/{profile_name}'
-        
-        def lambda_handler(event, context):
-            print(event)
-            instance_id = event["instance_id"]
-            environment_id = event["environment_id"]
-            role_name = f'cloud9-profile-{environment_id}'
-            instance_profile_name = f'cloud9-profile-{environment_id}'
-        
-            try:
-                iam_client.create_role(
-                    Path='/',
-                    RoleName=role_name,
-                    AssumeRolePolicyDocument=json.dumps(
-                        {
-                            'Version': '2012-10-17',
-                            'Statement': {
-                                'Effect': 'Allow',
-                                'Principal': {'Service': 'ec2.amazonaws.com'},
-                                'Action': 'sts:AssumeRole'
-                            }
-                        }),
-                    Description='EC2 Instance Profile Role'
-                )
-                sleep(30)
-            except iam_client.exceptions.EntityAlreadyExistsException as _:
-                pass
-            try:
-                policy_arn = os.environ['PolicyArn']
-                iam_client.attach_role_policy(
-                    RoleName=role_name,
-                    PolicyArn=policy_arn
-                )
-            except Exception as _:
-                pass
-            try:
-                iam_client.attach_role_policy(
-                    RoleName=role_name,
-                    PolicyArn='arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
-                )
-                iam_client.attach_role_policy(
-                    RoleName=role_name,
-                    PolicyArn='arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
-                )
-                # TODO Create Policy for resizing EBS
-            except Exception as e:
-                raise e
-            try:
-                create_instance_profile_response = iam_client.create_instance_profile(InstanceProfileName=instance_profile_name)
-                print(create_instance_profile_response)
-                sleep(30)
-            except iam_client.exceptions.EntityAlreadyExistsException as _:
-                pass
-            try:
-                response = iam_client.add_role_to_instance_profile(
-                    InstanceProfileName=instance_profile_name,
-                    RoleName=role_name
-                )
-                print(response)
-                response = ec2_client.associate_iam_instance_profile(
-                    IamInstanceProfile={'Name': instance_profile_name},
-                    InstanceId=instance_id
-                )
-                print(response)
-            except iam_client.exceptions.LimitExceededException as e:
-                print(e)
-            response = ec2_client.describe_iam_instance_profile_associations(Filters=[{'Name': 'instance-id','Values': [instance_id]},{'Name': 'state','Values': ['associated']}])
-            print(response)
-            while len(response['IamInstanceProfileAssociations']) < 1:
-                print("waiting for association to finish")
-                sleep(30)
-                response = ec2_client.describe_iam_instance_profile_associations(Filters=[{'Name': 'instance-id','Values': [instance_id]},{'Name': 'state','Values': ['associated']}])
-        
-            print("Stopping instance")
-            response = ec2_client.stop_instances(InstanceIds=[instance_id])
-            print(response)
-        
-            environment_info = {
-                "instance_id": instance_id,
-                "environment_id": environment_id,
-                "role_name": role_name,
-                "instance_profile_name": instance_profile_name
-            }
-            return environment_info
-        
-      Handler: index.lambda_handler
-      Runtime: python3.6
-      Timeout: 900
-      Environment: !If 
-        - AddPolicy
-        - Variables:
-            PolicyArn: !Ref PolicyArn
-        - !Ref "AWS::NoValue"
-      Policies:
-      - Statement:
-        - Sid: ResizePolicy
-          Effect: Allow
-          Action:
-            - "*"
-          Resource: "*"
-
   SendCommandFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -312,26 +179,26 @@ Resources:
         from io import BytesIO
         ssm_client = boto3.client('ssm')
         s3_resource = boto3.resource('s3')
-        
+
         def get_preamble():
             return f"""
         IN=$(curl http://169.254.169.254/latest/meta-data//hostname)
         arrIN=(${{IN//./ }})
         aws configure set profile.default.region ${{arrIN[1]}}
         SIZE={int(os.environ.get('VolumeSize', '25'))}
-        
+
         # Get the ID of the environment host Amazon EC2 instance.
         INSTANCEID=$(curl http://169.254.169.254/latest/meta-data//instance-id)
-        
+
         # Get the ID of the Amazon EBS volume associated with the instance.
         VOLUMEID=$(aws ec2 describe-instances \
           --instance-id $INSTANCEID \
           --query "Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId" \
           --output text)
-        
+
         # Resize the EBS volume.
         aws ec2 modify-volume --volume-id $VOLUMEID --size $SIZE
-        
+
         # Wait for the resize to finish.
         while [ \
           "$(aws ec2 describe-volumes-modifications \
@@ -341,31 +208,31 @@ Resources:
             --output text)" != "1" ]; do
         sleep 1
         done
-        
+
         if [ $(readlink -f /dev/xvda) = "/dev/xvda" ]
         then
           # Rewrite the partition table so that the partition takes up all the space that it can.
           sudo growpart /dev/xvda 1
-         
+
           # Expand the size of the file system.
           sudo resize2fs /dev/xvda1
-        
+
         else
           # Rewrite the partition table so that the partition takes up all the space that it can.
           sudo growpart /dev/nvme0n1 1
-        
+
           # Expand the size of the file system.
           sudo resize2fs /dev/nvme0n1p1
         fi
         """
-        
+
         def ssm_ready(ssm_client, instance_id):
             try:
                 response = ssm_client.describe_instance_information(Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}])
                 return len(response['InstanceInformationList'])>=1
             except ssm_client.exceptions.InvalidInstanceId:
                 return False
-        
+
         def instance_ready(instance_id):
             ec2_client = boto3.client('ec2')
             response = ec2_client.describe_instances(InstanceIds=[instance_id])
@@ -383,20 +250,20 @@ Resources:
             if state == 'running':
                 return True
             raise Exception("IDK what's happening")
-        
+
         def lambda_handler(event, context):
             print(event)
-            instance_id = event["instance_id"]
-            environment_id = event["environment_id"]
-            role_name = event["role_name"]
-            instance_profile_name = event['instance_profile_name']
-            
+            # instance_id = event["instance_id"]
+            # environment_id = event["environment_id"]
+            instance_id = event['resources'][0].split("/")[1]
+            environment_id = event['detail']['tags']['aws:cloud9:environment']
+
             if not instance_ready(instance_id):
                 raise Exception("Instance not ready yet")
-            
+
             if not ssm_ready(ssm_client, instance_id):
                 raise Exception("We're not ready yet")
-        
+
             try:
                 print(os.environ["S3Bucket"])
                 print(os.environ["S3Object"])
@@ -408,23 +275,23 @@ Resources:
             except Exception as e:
                 print(e)
                 commands = get_preamble()
-        
+
             send_command_response = ssm_client.send_command(
-                InstanceIds=[instance_id], 
-                DocumentName='AWS-RunShellScript', 
+                InstanceIds=[instance_id],
+                DocumentName='AWS-RunShellScript',
                 Parameters={'commands': commands.split('\n')},
                 CloudWatchOutputConfig={
                     'CloudWatchLogGroupName': f'ssm-output-{instance_id}',
                     'CloudWatchOutputEnabled': True
                 }
             )
-        
+
             environment_info = {
                 "instance_id": instance_id,
                 "command_id": send_command_response['Command']['CommandId']
             }
             return environment_info
-        
+
       Handler: index.lambda_handler
       Runtime: python3.6
       Environment:
@@ -451,7 +318,7 @@ Resources:
     Properties:
       InlineCode: |
         import boto3
-        
+
         def lambda_handler(event, context):
             command_id = event["command_id"]
             instance_id = event["instance_id"]
@@ -479,7 +346,7 @@ Resources:
         import json
         import cfnresponse
         import os
-        
+
         def lambda_handler(event, context):
           try:
             client = boto3.client('events')
@@ -512,6 +379,3 @@ Outputs:
   BootStrapC9StateMachineArn:
     Description: "Stock Trading State machine ARN"
     Value: !Ref BootStrapC9StateMachine
-  BootStrapC9StateMachineRoleArn:
-    Description: "IAM Role created for State machine based on the specified SAM Policy Templates"
-    Value: !GetAtt BootStrapC9StateMachineRole.Arn
